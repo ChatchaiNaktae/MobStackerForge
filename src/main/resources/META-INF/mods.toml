@@ -1,0 +1,43 @@
+modLoader="javafml"
+loaderVersion="[46,)" # รองรับ Forge 1.20.1
+license="All rights reserved"
+issueTrackerURL="https://github.com/" # ใส่ลิงก์ GitHub ถ้ามี (ไม่ใส่ก็ได้)
+
+[[mods]]
+modId="mobstacker"
+version="1.5.6"
+displayName="Mob Stacker"
+displayURL="https://curseforge.com/"
+logoFile="logo.png" # อย่าลืมเอารูป logo.png ไปใส่ใน folder resources นะครับ (ถ้าไม่มีให้ลบบรรทัดนี้)
+credits="DevDroggy"
+authors="DevDroggy" # แก้เป็นชื่อคุณได้เลย
+description='''
+Mob Stacker - Optimization & Loot System
+
+Is your world lagging due to too many mob farms or dropped items? Mob Stacker is a lightweight Forge mod designed to optimize performance by grouping nearby entities while keeping the gameplay rewarding.
+
+Key Features:
+- Smart Mob Stacking: Automatically merges nearby mobs to reduce entity count.
+- Age Separation: Smart logic ensures Baby mobs only stack with other Babies, and Adults with Adults.
+- Loot Multiplier: Killing a stacked mob (e.g., "Pig x5") drops loot equivalent to killing 5 individual mobs.
+- Item Over-Stacking: Dropped items on the ground can merge beyond the vanilla limit of 64.
+- Visual & Sound Effects: Satisfying small explosion particles and "pop" sounds when entities merge.
+- Custom Indicators: Beautifully formatted names with colored text (Aqua names, Gold Italic numbers).
+
+Works out of the box for Minecraft 1.20.1 (Forge).
+'''
+
+# --- Dependencies (การพึ่งพา) ---
+[[dependencies.mobstacker]]
+modId="forge"
+mandatory=true
+versionRange="[46,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.mobstacker]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
+ordering="NONE"
+side="BOTH"
