@@ -6,6 +6,8 @@ public class ModConfig {
     public static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
     public static final ForgeConfigSpec SPEC;
 
+    public static final ForgeConfigSpec.BooleanValue ENABLE_ITEM_STACKING;
+
     // --- Configuration Variables ---
     public static final ForgeConfigSpec.DoubleValue MOB_RADIUS;
     public static final ForgeConfigSpec.DoubleValue ITEM_RADIUS;
@@ -17,6 +19,11 @@ public class ModConfig {
 
     static {
         BUILDER.push("General Settings");
+
+        ENABLE_ITEM_STACKING = builder
+                .comment("Set to false to completely disable the Item Stacking feature.")
+                .comment("Useful for preventing duplication bugs with mods like Create.")
+                .define("enableItemStacking", true);
 
         // Merge distance settings
         MOB_RADIUS = BUILDER.comment("Mob Merge Radius (The distance within which mobs will be merged together)")
