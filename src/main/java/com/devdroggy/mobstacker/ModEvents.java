@@ -7,7 +7,9 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -15,12 +17,18 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.animal.Animal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Monster;
-import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.*;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
 import net.minecraftforge.event.entity.living.LivingExperienceDropEvent; // ADDED: Import for XP drops
 import net.minecraftforge.event.entity.living.LivingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraft.world.entity.animal.Sheep;
+import net.minecraft.world.entity.animal.Chicken;
+import net.minecraft.world.level.ItemLike;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.item.DyeItem;
 
 import java.util.Collection;
 import java.util.List;
@@ -51,7 +59,7 @@ public class ModEvents {
         List<LivingEntity> neighbors = entity.level().getEntitiesOfClass(
                 LivingEntity.class,
                 entity.getBoundingBox().inflate(radius),
-                e -> e != entity && e.getType() == entity.getType() && e.isAlive()
+                e -> e != entity && e.getType() == entity.getType() && e.isAlive() && isCompatible(entity, e)
         );
 
         if (neighbors.size() + 1 < minThreshold) return;
@@ -162,6 +170,103 @@ public class ModEvents {
         }
     }
 
+    // ==================================================
+    // 4. Fix: Sheep Shearing & Dyeing Multiplier
+    // ==================================================
+    @SubscribeEvent
+    public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
+        // Do NOT return immediately on ClientSide. We need to sync the cancellation!
+        Entity target = event.getTarget();
+        ItemStack itemStack = event.getItemStack();
+
+        if (target instanceof net.minecraft.world.entity.animal.Sheep sheep) {
+            int stackSize = getStackSize(sheep);
+
+            // --- System 1: Shearing ---
+            if (itemStack.getItem() instanceof net.minecraft.world.item.ShearsItem) {
+                if (sheep.readyForShearing() && stackSize > 1) {
+                    // Only process the extra drops on the Server side
+                    if (!event.getLevel().isClientSide) {
+                        int extraSheep = stackSize - 1;
+                        int totalExtraWool = 0;
+
+                        for (int i = 0; i < extraSheep; i++) {
+                            totalExtraWool += 1 + sheep.getRandom().nextInt(3);
+                        }
+
+                        if (totalExtraWool > 0) {
+                            net.minecraft.world.level.ItemLike woolItem = getWoolByColor(sheep.getColor());
+                            if (woolItem != null) {
+                                ItemStack extraWoolStack = new ItemStack(woolItem, totalExtraWool);
+                                sheep.spawnAtLocation(extraWoolStack);
+                            }
+                        }
+                    }
+                }
+            }
+            // --- System 2: Dyeing ---
+            else if (itemStack.getItem() instanceof DyeItem dyeItem) {
+                net.minecraft.world.item.DyeColor newColor = dyeItem.getDyeColor();
+
+                if (sheep.getColor() != newColor && stackSize > 1) {
+                    // Cancel the event on BOTH Client and Server to prevent visual desync (ghost entities)
+                    event.setCanceled(true);
+                    event.setCancellationResult(InteractionResult.SUCCESS);
+
+                    // Execute the separation logic only on the Server side
+                    if (!event.getLevel().isClientSide) {
+                        if (!event.getEntity().isCreative()) {
+                            itemStack.shrink(1);
+                        }
+
+                        setStackSize(sheep, stackSize - 1);
+
+                        net.minecraft.world.entity.animal.Sheep dyedSheep = EntityType.SHEEP.create(sheep.level());
+                        if (dyedSheep != null) {
+                            dyedSheep.moveTo(sheep.getX(), sheep.getY(), sheep.getZ(), sheep.getYRot(), sheep.getXRot());
+                            dyedSheep.setColor(newColor);
+
+                            // Copy the exact age to prevent adult sheep from looking like babies for a split second
+                            dyedSheep.setAge(sheep.getAge());
+
+                            sheep.level().addFreshEntity(dyedSheep);
+                            sheep.playSound(net.minecraft.sounds.SoundEvents.DYE_USE, 1.0F, 1.0F);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==================================================
+    // 5. Fix: Chicken Egg Laying Multiplier
+    // ==================================================
+    @SubscribeEvent
+    public void onChickenTick(LivingEvent.LivingTickEvent event) {
+        // Do nothing on the client side
+        if (event.getEntity().level().isClientSide) return;
+
+        // Check if the entity is a Chicken
+        if (event.getEntity() instanceof Chicken chicken) {
+            int stackSize = getStackSize(chicken);
+
+            if (stackSize > 1) {
+                int extraChickens = stackSize - 1;
+
+                // Vanilla chickens lay an egg every 6000 to 12000 ticks (average 9000)
+                // We give each extra chicken a 1/9000 chance to lay an egg every tick
+                for (int i = 0; i < extraChickens; i++) {
+                    if (chicken.getRandom().nextInt(9000) == 0) {
+                        // Play the popping sound
+                        chicken.playSound(SoundEvents.CHICKEN_EGG, 1.0F, (chicken.getRandom().nextFloat() - chicken.getRandom().nextFloat()) * 0.2F + 1.0F);
+                        // Drop an egg
+                        chicken.spawnAtLocation(Items.EGG);
+                    }
+                }
+            }
+        }
+    }
+
     private void processItemStacking(ItemEntity currentItem, ServerLevel level) {
         if (!currentItem.isAlive()) return;
 
@@ -229,19 +334,29 @@ public class ModEvents {
         entity.getPersistentData().putInt(STACK_NBT_KEY, size);
 
         if (ModConfig.SHOW_MOB_COUNT.get() && size > 1) {
-            String rawName = entity.getType().getDescription().getString();
-            if (entity.isBaby()) rawName = "Baby " + rawName;
+            String mobName = entity.getType().getDescription().getString();
+            var finalName = Component.empty();
 
-            var namePart = Component.literal(rawName).withStyle(ChatFormatting.AQUA);
-            var separatorPart = Component.literal(" x").withStyle(ChatFormatting.GRAY);
-            var numberPart = Component.literal(String.valueOf(size)).withStyle(ChatFormatting.GOLD).withStyle(ChatFormatting.ITALIC);
+            if (entity instanceof net.minecraft.world.entity.animal.Sheep sheep) {
+                String colorName = sheep.getColor().getName().substring(0, 1).toUpperCase() + sheep.getColor().getName().substring(1);
+                finalName.append(Component.literal("(" + colorName + ") ").withStyle(ChatFormatting.GRAY));
+            }
 
-            Component newName = namePart.append(separatorPart).append(numberPart);
+            if (entity.isBaby()) {
+                finalName.append(Component.literal("Baby ").withStyle(ChatFormatting.WHITE));
+            }
 
-            if (!entity.hasCustomName() || !entity.getCustomName().getString().equals(newName.getString())) {
-                entity.setCustomName(newName);
+            finalName.append(Component.literal(mobName).withStyle(ChatFormatting.AQUA));
+            finalName.append(Component.literal(" x").withStyle(ChatFormatting.GRAY))
+                    .append(Component.literal(String.valueOf(size)).withStyle(ChatFormatting.GOLD).withStyle(ChatFormatting.ITALIC));
+
+            if (!entity.hasCustomName() || !entity.getCustomName().getString().equals(finalName.getString())) {
+                entity.setCustomName(finalName);
                 entity.setCustomNameVisible(true);
             }
+        } else {
+            entity.setCustomName(null);
+            entity.setCustomNameVisible(false);
         }
 
         updateHealthAttribute(entity, size);
@@ -267,5 +382,39 @@ public class ModEvents {
             healthAttribute.addTransientModifier(modifier);
             entity.setHealth(entity.getMaxHealth());
         }
+    }
+
+    // ==================================================
+    // ฟังก์ชันช่วยเหลือ (Helper) สำหรับจับคู่สีแกะ กับ ไอเทมขนแกะ
+    // ==================================================
+    private ItemLike getWoolByColor(DyeColor color) {
+        return switch (color) {
+            case WHITE -> Blocks.WHITE_WOOL;
+            case ORANGE -> Blocks.ORANGE_WOOL;
+            case MAGENTA -> Blocks.MAGENTA_WOOL;
+            case LIGHT_BLUE -> Blocks.LIGHT_BLUE_WOOL;
+            case YELLOW -> Blocks.YELLOW_WOOL;
+            case LIME -> Blocks.LIME_WOOL;
+            case PINK -> Blocks.PINK_WOOL;
+            case GRAY -> Blocks.GRAY_WOOL;
+            case LIGHT_GRAY -> Blocks.LIGHT_GRAY_WOOL;
+            case CYAN -> Blocks.CYAN_WOOL;
+            case PURPLE -> Blocks.PURPLE_WOOL;
+            case BLUE -> Blocks.BLUE_WOOL;
+            case BROWN -> Blocks.BROWN_WOOL;
+            case GREEN -> Blocks.GREEN_WOOL;
+            case RED -> Blocks.RED_WOOL;
+            case BLACK -> Blocks.BLACK_WOOL;
+        };
+    }
+
+    // Check if two entities have the same visual attributes (like sheep color)
+    private boolean isCompatible(LivingEntity a, LivingEntity b) {
+        // Sheep Color Check
+        if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
+            return sheepA.getColor() == sheepB.getColor();
+        }
+        // You can add more checks here (e.g., Horse variants, Parrot colors)
+        return true;
     }
 }
