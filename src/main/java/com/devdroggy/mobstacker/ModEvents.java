@@ -15,20 +15,19 @@ import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.animal.Animal;
+import net.minecraft.world.entity.animal.Chicken;
+import net.minecraft.world.entity.animal.Sheep;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.item.*;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.event.entity.living.LivingExperienceDropEvent; // ADDED: Import for XP drops
-import net.minecraftforge.event.entity.living.LivingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraft.world.entity.animal.Sheep;
-import net.minecraft.world.entity.animal.Chicken;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.item.DyeItem;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.living.LivingDropsEvent;
+import net.minecraftforge.event.entity.living.LivingExperienceDropEvent;
+import net.minecraftforge.event.entity.living.LivingEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
 
 import java.util.Collection;
 import java.util.List;
@@ -38,10 +37,12 @@ public class ModEvents {
 
     public static int CHECK_INTERVAL = 10;
     private static final String STACK_NBT_KEY = "StackAmount";
+    private static final String SPLIT_TIME_NBT_KEY = "MobStackerSplitTime";
+    private static final int SPLIT_COOLDOWN_TICKS = 100; // 5 seconds
     private static final UUID HEALTH_MODIFIER_UUID = UUID.fromString("d05b8a0a-e555-4e0f-bf3a-f10e1346210f");
 
     // ==================================================
-    // 1. ระบบรวมร่าง MOB
+    // 1. Mob Merging (with split cooldown)
     // ==================================================
     @SubscribeEvent
     public void onLivingTick(LivingEvent.LivingTickEvent event) {
@@ -52,6 +53,9 @@ public class ModEvents {
         if (entity.level().isClientSide || CHECK_INTERVAL <= 0 || entity.tickCount % CHECK_INTERVAL != 0) return;
         if (!(entity instanceof Monster) && !(entity instanceof Animal)) return;
         if (!entity.isAlive()) return;
+
+        // Prevent any entity that was recently split from merging
+        if (hasRecentSplit(entity)) return;
 
         double radius = ModConfig.MOB_RADIUS.get();
         int minThreshold = ModConfig.MIN_STACK_THRESHOLD.get();
@@ -87,7 +91,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 2. ระบบดรอปของคูณ (Loot Multiplier) - FIXED & OPTIMIZED
+    // 2. Loot / XP multiplication
     // ==================================================
     @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
@@ -97,18 +101,12 @@ public class ModEvents {
         if (stackSize > 1) {
             Collection<ItemEntity> drops = event.getDrops();
             List<ItemEntity> originalDrops = List.copyOf(drops);
-
-            // 1. Clear the original drops to rebuild them properly
             drops.clear();
 
             for (ItemEntity originalItem : originalDrops) {
                 ItemStack baseStack = originalItem.getItem();
-
-                // 2. Calculate total items (Original count * Stack size)
-                // Exactly calculated to prevent missing items
                 int totalItems = baseStack.getCount() * stackSize;
 
-                // 3. Loop to create new ItemEntities, capped at Max Stack Size (usually 64)
                 while (totalItems > 0) {
                     int amountForThisStack = Math.min(totalItems, baseStack.getMaxStackSize());
                     totalItems -= amountForThisStack;
@@ -124,7 +122,6 @@ public class ModEvents {
                             newStack
                     );
 
-                    // 4. Important: Copy movement (physics) and set pickup delay to prevent glitches
                     newItem.setDeltaMovement(originalItem.getDeltaMovement());
                     newItem.setDefaultPickUpDelay();
 
@@ -134,30 +131,21 @@ public class ModEvents {
         }
     }
 
-    // ==================================================
-    // โบนัส: ระบบดรอป XP คูณตามจำนวน Stack
-    // ==================================================
     @SubscribeEvent
     public void onExperienceDrop(LivingExperienceDropEvent event) {
         LivingEntity entity = event.getEntity();
         int stackSize = getStackSize(entity);
-
         if (stackSize > 1) {
-            int originalXp = event.getDroppedExperience();
-            // Multiply dropped XP by the stack size
-            event.setDroppedExperience(originalXp * stackSize);
+            event.setDroppedExperience(event.getDroppedExperience() * stackSize);
         }
     }
 
     // ==================================================
-    // 3. ระบบรวม ITEM (Stack เกิน 64)
+    // 3. Item stacking
     // ==================================================
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
-        // --- แทรกบรรทัดนี้เข้าไปบนสุด ---
-        // ถ้า Config ถูกตั้งเป็น false ให้หยุดการทำงาน (return) ออกไปเลยทันที
         if (!ModConfig.ENABLE_ITEM_STACKING.get()) return;
-
         if (event.level.isClientSide || event.phase != TickEvent.Phase.END) return;
         if (CHECK_INTERVAL > 0 && event.level.getGameTime() % CHECK_INTERVAL != 0) return;
 
@@ -171,67 +159,108 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 4. Fix: Sheep Shearing & Dyeing Multiplier
+    // 4. Special entity interactions (sheep, chicken, split)
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
-        // Do NOT return immediately on ClientSide. We need to sync the cancellation!
         Entity target = event.getTarget();
         ItemStack itemStack = event.getItemStack();
 
-        if (target instanceof net.minecraft.world.entity.animal.Sheep sheep) {
+        // --- Sheep shearing / dyeing (existing logic) ---
+        if (target instanceof Sheep sheep) {
             int stackSize = getStackSize(sheep);
 
-            // --- System 1: Shearing ---
-            if (itemStack.getItem() instanceof net.minecraft.world.item.ShearsItem) {
+            // Shearing
+            if (itemStack.getItem() instanceof ShearsItem) {
                 if (sheep.readyForShearing() && stackSize > 1) {
-                    // Only process the extra drops on the Server side
                     if (!event.getLevel().isClientSide) {
                         int extraSheep = stackSize - 1;
                         int totalExtraWool = 0;
-
                         for (int i = 0; i < extraSheep; i++) {
                             totalExtraWool += 1 + sheep.getRandom().nextInt(3);
                         }
-
                         if (totalExtraWool > 0) {
-                            net.minecraft.world.level.ItemLike woolItem = getWoolByColor(sheep.getColor());
+                            ItemLike woolItem = getWoolByColor(sheep.getColor());
                             if (woolItem != null) {
-                                ItemStack extraWoolStack = new ItemStack(woolItem, totalExtraWool);
-                                sheep.spawnAtLocation(extraWoolStack);
+                                sheep.spawnAtLocation(new ItemStack(woolItem, totalExtraWool));
                             }
                         }
                     }
                 }
             }
-            // --- System 2: Dyeing ---
+            // Dyeing
             else if (itemStack.getItem() instanceof DyeItem dyeItem) {
-                net.minecraft.world.item.DyeColor newColor = dyeItem.getDyeColor();
-
+                DyeColor newColor = dyeItem.getDyeColor();
                 if (sheep.getColor() != newColor && stackSize > 1) {
-                    // Cancel the event on BOTH Client and Server to prevent visual desync (ghost entities)
                     event.setCanceled(true);
                     event.setCancellationResult(InteractionResult.SUCCESS);
-
-                    // Execute the separation logic only on the Server side
                     if (!event.getLevel().isClientSide) {
                         if (!event.getEntity().isCreative()) {
                             itemStack.shrink(1);
                         }
-
                         setStackSize(sheep, stackSize - 1);
-
-                        net.minecraft.world.entity.animal.Sheep dyedSheep = EntityType.SHEEP.create(sheep.level());
+                        Sheep dyedSheep = EntityType.SHEEP.create(sheep.level());
                         if (dyedSheep != null) {
-                            dyedSheep.moveTo(sheep.getX(), sheep.getY(), sheep.getZ(), sheep.getYRot(), sheep.getXRot());
+                            dyedSheep.moveTo(sheep.getX(), sheep.getY(), sheep.getZ(),
+                                    sheep.getYRot(), sheep.getXRot());
                             dyedSheep.setColor(newColor);
-
-                            // Copy the exact age to prevent adult sheep from looking like babies for a split second
                             dyedSheep.setAge(sheep.getAge());
-
                             sheep.level().addFreshEntity(dyedSheep);
-                            sheep.playSound(net.minecraft.sounds.SoundEvents.DYE_USE, 1.0F, 1.0F);
+                            sheep.playSound(SoundEvents.DYE_USE, 1.0F, 1.0F);
                         }
+                    }
+                    return; // stop further processing for this sheep
+                }
+            }
+        }
+
+        // --- NEW: Shift + right‑click with empty hand halves a stack ---
+        if (target instanceof LivingEntity livingEntity &&
+                event.getEntity().isShiftKeyDown() &&
+                event.getItemStack().isEmpty()) {
+
+            int stackSize = getStackSize(livingEntity);
+            if (stackSize > 1) {
+                event.setCanceled(true);
+                event.setCancellationResult(InteractionResult.SUCCESS);
+
+                if (!event.getLevel().isClientSide) {
+                    int half = stackSize / 2;
+                    int remaining = stackSize - half;
+
+                    setStackSize(livingEntity, remaining);
+
+                    EntityType<?> type = livingEntity.getType();
+                    Entity newEntity = type.create(livingEntity.level());
+                    if (newEntity instanceof LivingEntity newLiving) {
+                        newEntity.moveTo(livingEntity.getX(), livingEntity.getY(), livingEntity.getZ(),
+                                livingEntity.getYRot(), livingEntity.getXRot());
+
+                        // Match baby state and age (works for animals, safe for others)
+                        newLiving.setBaby(livingEntity.isBaby());
+                        newLiving.setAge(livingEntity.getAge());
+
+                        // Copy sheep colour if applicable
+                        if (livingEntity instanceof Sheep oldSheep && newLiving instanceof Sheep newSheep) {
+                            newSheep.setColor(oldSheep.getColor());
+                        }
+
+                        setStackSize(newLiving, half);
+
+                        // Mark both as recently split so they don’t instantly re‑merge
+                        long gameTime = livingEntity.level().getGameTime();
+                        livingEntity.getPersistentData().putLong(SPLIT_TIME_NBT_KEY, gameTime);
+                        newLiving.getPersistentData().putLong(SPLIT_TIME_NBT_KEY, gameTime);
+
+                        // Visual / audio feedback
+                        if (livingEntity.level() instanceof ServerLevel serverLevel) {
+                            serverLevel.sendParticles(ParticleTypes.CLOUD,
+                                    livingEntity.getX(), livingEntity.getY() + 0.5, livingEntity.getZ(),
+                                    5, 0.2, 0.2, 0.2, 0.02);
+                            serverLevel.playSound(null, livingEntity.getX(), livingEntity.getY(), livingEntity.getZ(),
+                                    SoundEvents.SLIME_SQUISH, SoundSource.NEUTRAL, 0.5f, 1.0f);
+                        }
+                        livingEntity.level().addFreshEntity(newLiving);
                     }
                 }
             }
@@ -239,27 +268,19 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Fix: Chicken Egg Laying Multiplier
+    // 5. Chicken egg‑laying multiplier
     // ==================================================
     @SubscribeEvent
     public void onChickenTick(LivingEvent.LivingTickEvent event) {
-        // Do nothing on the client side
         if (event.getEntity().level().isClientSide) return;
-
-        // Check if the entity is a Chicken
         if (event.getEntity() instanceof Chicken chicken) {
             int stackSize = getStackSize(chicken);
-
             if (stackSize > 1) {
                 int extraChickens = stackSize - 1;
-
-                // Vanilla chickens lay an egg every 6000 to 12000 ticks (average 9000)
-                // We give each extra chicken a 1/9000 chance to lay an egg every tick
                 for (int i = 0; i < extraChickens; i++) {
                     if (chicken.getRandom().nextInt(9000) == 0) {
-                        // Play the popping sound
-                        chicken.playSound(SoundEvents.CHICKEN_EGG, 1.0F, (chicken.getRandom().nextFloat() - chicken.getRandom().nextFloat()) * 0.2F + 1.0F);
-                        // Drop an egg
+                        chicken.playSound(SoundEvents.CHICKEN_EGG, 1.0F,
+                                (chicken.getRandom().nextFloat() - chicken.getRandom().nextFloat()) * 0.2F + 1.0F);
                         chicken.spawnAtLocation(Items.EGG);
                     }
                 }
@@ -267,6 +288,9 @@ public class ModEvents {
         }
     }
 
+    // ==================================================
+    // UTILITY METHODS
+    // ==================================================
     private void processItemStacking(ItemEntity currentItem, ServerLevel level) {
         if (!currentItem.isAlive()) return;
 
@@ -281,7 +305,6 @@ public class ModEvents {
         }
 
         double radius = ModConfig.ITEM_RADIUS.get();
-
         List<ItemEntity> neighbors = level.getEntitiesOfClass(
                 ItemEntity.class,
                 currentItem.getBoundingBox().inflate(radius),
@@ -290,20 +313,17 @@ public class ModEvents {
 
         for (ItemEntity neighbor : neighbors) {
             ItemStack neighborStack = neighbor.getItem();
-
             if (ItemStack.isSameItemSameTags(stack, neighborStack)) {
                 int totalCount = stack.getCount() + neighborStack.getCount();
                 stack.setCount(totalCount);
                 neighbor.discard();
 
-                // อัปเดต Nametag และความจำให้เป็นปัจจุบันทันทีหลังรวมร่าง
                 updateItemName(currentItem, totalCount);
                 data.putInt("LastItemCount", totalCount);
 
                 level.sendParticles(ParticleTypes.INSTANT_EFFECT,
                         currentItem.getX(), currentItem.getY() + 0.5, currentItem.getZ(),
                         1, 0.0, 0.0, 0.0, 0.0);
-
                 level.playSound(null, currentItem.getX(), currentItem.getY(), currentItem.getZ(),
                         SoundEvents.ITEM_PICKUP, SoundSource.AMBIENT, 0.2f, 2.0f);
                 break;
@@ -311,9 +331,6 @@ public class ModEvents {
         }
     }
 
-    // ==================================================
-    // UTILITY METHODS
-    // ==================================================
     private void updateItemName(ItemEntity itemEntity, int count) {
         if (!ModConfig.SHOW_MOB_COUNT.get()) return;
 
@@ -352,7 +369,7 @@ public class ModEvents {
             String mobName = entity.getType().getDescription().getString();
             var finalName = Component.empty();
 
-            if (entity instanceof net.minecraft.world.entity.animal.Sheep sheep) {
+            if (entity instanceof Sheep sheep) {
                 String colorName = sheep.getColor().getName().substring(0, 1).toUpperCase() + sheep.getColor().getName().substring(1);
                 finalName.append(Component.literal("(" + colorName + ") ").withStyle(ChatFormatting.GRAY));
             }
@@ -386,22 +403,17 @@ public class ModEvents {
 
         if (bonusPerStack > 0 && stackSize > 1) {
             double totalBonus = (stackSize - 1) * bonusPerStack;
-
             AttributeModifier modifier = new AttributeModifier(
                     HEALTH_MODIFIER_UUID,
                     "Stack Health Bonus",
                     totalBonus,
                     AttributeModifier.Operation.ADDITION
             );
-
             healthAttribute.addTransientModifier(modifier);
             entity.setHealth(entity.getMaxHealth());
         }
     }
 
-    // ==================================================
-    // ฟังก์ชันช่วยเหลือ (Helper) สำหรับจับคู่สีแกะ กับ ไอเทมขนแกะ
-    // ==================================================
     private ItemLike getWoolByColor(DyeColor color) {
         return switch (color) {
             case WHITE -> Blocks.WHITE_WOOL;
@@ -423,13 +435,19 @@ public class ModEvents {
         };
     }
 
-    // Check if two entities have the same visual attributes (like sheep color)
     private boolean isCompatible(LivingEntity a, LivingEntity b) {
-        // Sheep Color Check
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
             return sheepA.getColor() == sheepB.getColor();
         }
-        // You can add more checks here (e.g., Horse variants, Parrot colors)
         return true;
+    }
+
+    private boolean hasRecentSplit(LivingEntity entity) {
+        CompoundTag data = entity.getPersistentData();
+        if (data.contains(SPLIT_TIME_NBT_KEY)) {
+            long splitTime = data.getLong(SPLIT_TIME_NBT_KEY);
+            return entity.level().getGameTime() - splitTime < SPLIT_COOLDOWN_TICKS;
+        }
+        return false;
     }
 }
