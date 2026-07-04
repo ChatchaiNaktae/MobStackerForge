@@ -36,19 +36,19 @@ public class ModEvents {
     public static int CHECK_INTERVAL = 10;
     private static final String STACK_NBT_KEY = "StackAmount";
     private static final String SPLIT_TIME_NBT_KEY = "MobStackerSplitTime";
-    private static final int SPLIT_COOLDOWN_TICKS = 100;
+    private static final int SPLIT_COOLDOWN_TICKS = 100; // 5 seconds
 
     private static final String HONEY_PLAYER_NBT = "HoneyPlayerUUID";
     private static final String HONEY_TIME_NBT = "HoneyTime";
     private static final String HONEY_PARTNER_NBT = "HoneyPartnerUUID";
-    private static final int HONEY_TIMEOUT_TICKS = 600;
+    private static final int HONEY_TIMEOUT_TICKS = 600; // 30 seconds
     private static final double HONEY_PAIR_RADIUS = 10.0;
 
     private static final String LOCK_NBT_KEY = "MobStackerLocked";
     private static final UUID HEALTH_MODIFIER_UUID = UUID.fromString("d05b8a0a-e555-4e0f-bf3a-f10e1346210f");
 
     // ==================================================
-    // 1. Mob Merging
+    // 1. Mob Merging (with split cooldown, baby/adult separation, monster config)
     // ==================================================
     @SubscribeEvent
     public void onLivingTick(LivingEvent.LivingTickEvent event) {
@@ -59,7 +59,10 @@ public class ModEvents {
         if (!(entity instanceof Monster) && !(entity instanceof Animal)) return;
         if (!entity.isAlive()) return;
 
-        // Skip immune entities
+        // New config check: skip monsters if merging is disabled
+        if (entity instanceof Monster && !ModConfig.ENABLE_MONSTER_MERGING.get()) return;
+
+        // Skip entities that are temporarily immune
         if (hasRecentSplit(entity) || hasHoneyData(entity) || isLocked(entity)) return;
 
         double radius = ModConfig.MOB_RADIUS.get();
@@ -93,7 +96,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 2. Honey pairing
+    // 2. Honey comb pairing & following
     // ==================================================
     @SubscribeEvent
     public void onHoneyTick(LivingEvent.LivingTickEvent event) {
@@ -114,11 +117,13 @@ public class ModEvents {
         long currentTime = mob.level().getGameTime();
         long honeyTime = data.getLong(HONEY_TIME_NBT);
 
+        // Timeout
         if (currentTime - honeyTime > HONEY_TIMEOUT_TICKS) {
             clearHoneyData(mob);
             return;
         }
 
+        // Follow the player (only if Mob)
         if (mob instanceof Mob mobEntity) {
             UUID playerUUID = UUID.fromString(data.getString(HONEY_PLAYER_NBT));
             Player player = mob.level().getPlayerByUUID(playerUUID);
@@ -127,6 +132,7 @@ public class ModEvents {
             }
         }
 
+        // Yellow sparkles
         if (mob.tickCount % 5 == 0 && mob.level() instanceof ServerLevel serverLevel) {
             serverLevel.sendParticles(ParticleTypes.WAX_ON,
                     mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(),
@@ -143,7 +149,8 @@ public class ModEvents {
                 return;
             }
 
-            if (mob instanceof Mob mobEntity) {
+            // Move toward partner (only if Mob)
+            if (mob instanceof Mob mobEntity && partner instanceof Mob) {
                 double dist = mob.distanceToSqr(partner);
                 if (dist > 2.0) {
                     mobEntity.getNavigation().moveTo(partner, 1.5);
@@ -153,8 +160,10 @@ public class ModEvents {
                                 1, 0.3, 0.1, 0.3, 0.01);
                     }
                 } else {
+                    // Close enough – merge
                     int myStack = getStackSize(mob);
                     int otherStack = getStackSize(partner);
+
                     setStackSize(mob, myStack + otherStack);
 
                     serverLevel.sendParticles(ParticleTypes.HEART,
@@ -182,38 +191,49 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 3. Loot / XP
+    // 3. Loot / XP multiplication (with immediate item merging)
     // ==================================================
     @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
         LivingEntity entity = event.getEntity();
         int stackSize = getStackSize(entity);
-        if (stackSize > 1) {
-            Collection<ItemEntity> drops = event.getDrops();
-            List<ItemEntity> originalDrops = List.copyOf(drops);
-            drops.clear();
+        if (stackSize <= 1) return;
 
-            for (ItemEntity originalItem : originalDrops) {
-                ItemStack baseStack = originalItem.getItem();
-                int totalItems = baseStack.getCount() * stackSize;
+        Collection<ItemEntity> drops = event.getDrops();
+        List<ItemEntity> originalDrops = List.copyOf(drops);
+        drops.clear();
 
-                while (totalItems > 0) {
-                    int amountForThisStack = Math.min(totalItems, baseStack.getMaxStackSize());
-                    totalItems -= amountForThisStack;
+        // Re-create multiplied drops
+        for (ItemEntity originalItem : originalDrops) {
+            ItemStack baseStack = originalItem.getItem();
+            int totalItems = baseStack.getCount() * stackSize;
 
-                    ItemStack newStack = baseStack.copy();
-                    newStack.setCount(amountForThisStack);
+            while (totalItems > 0) {
+                int amount = Math.min(totalItems, baseStack.getMaxStackSize());
+                totalItems -= amount;
 
-                    ItemEntity newItem = new ItemEntity(
-                            entity.level(),
-                            originalItem.getX(),
-                            originalItem.getY(),
-                            originalItem.getZ(),
-                            newStack
-                    );
-                    newItem.setDeltaMovement(originalItem.getDeltaMovement());
-                    newItem.setDefaultPickUpDelay();
-                    drops.add(newItem);
+                ItemStack newStack = baseStack.copy();
+                newStack.setCount(amount);
+
+                ItemEntity newItem = new ItemEntity(
+                        entity.level(),
+                        originalItem.getX(),
+                        originalItem.getY(),
+                        originalItem.getZ(),
+                        newStack
+                );
+                newItem.setDeltaMovement(originalItem.getDeltaMovement());
+                newItem.setDefaultPickUpDelay();
+                drops.add(newItem);
+            }
+        }
+
+        // Immediately merge items on the ground
+        if (entity.level() instanceof ServerLevel serverLevel) {
+            List<ItemEntity> toProcess = new ArrayList<>(drops);
+            for (ItemEntity item : toProcess) {
+                if (item.isAlive()) {
+                    processItemStacking(item, serverLevel);
                 }
             }
         }
@@ -229,7 +249,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 4. Item stacking
+    // 4. Item stacking (periodic background merging)
     // ==================================================
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
@@ -247,18 +267,18 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Interactions (FIXED: only MAIN_HAND processed)
+    // 5. Interactions (sheep, honey comb, emerald, split)
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
-        // ✅ Only process the main hand to avoid double execution
+        // Only process main hand to avoid double execution
         if (event.getHand() != InteractionHand.MAIN_HAND) return;
 
         Entity target = event.getTarget();
         ItemStack itemStack = event.getItemStack();
         Player player = event.getEntity();
 
-        // --- Sheep shearing / dyeing ---
+        // --- Sheep shearing / dyeing (with split cooldown fix) ---
         if (target instanceof Sheep sheep) {
             int stackSize = getStackSize(sheep);
 
@@ -276,7 +296,9 @@ public class ModEvents {
                         }
                     }
                 }
-            } else if (itemStack.getItem() instanceof DyeItem dyeItem) {
+            }
+            // Dyeing – adds split cooldown to prevent re-merge
+            else if (itemStack.getItem() instanceof DyeItem dyeItem) {
                 DyeColor newColor = dyeItem.getDyeColor();
                 if (sheep.getColor() != newColor && stackSize > 1) {
                     event.setCanceled(true);
@@ -305,7 +327,7 @@ public class ModEvents {
             }
         }
 
-        // --- Honey Comb ---
+        // --- Honey Comb on any LivingEntity (excluding locked) ---
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
             if (isLocked(living)) return;
 
@@ -320,6 +342,7 @@ public class ModEvents {
                     data.putLong(HONEY_TIME_NBT, living.level().getGameTime());
                     data.remove(HONEY_PARTNER_NBT);
 
+                    // Look for another honeyed mob of the same type/compatibility
                     List<LivingEntity> candidates = living.level().getEntitiesOfClass(
                             LivingEntity.class,
                             living.getBoundingBox().inflate(HONEY_PAIR_RADIUS),
@@ -344,7 +367,7 @@ public class ModEvents {
             return;
         }
 
-        // --- Emerald lock ---
+        // --- Emerald locking ---
         if (itemStack.getItem() == Items.EMERALD && target instanceof LivingEntity living) {
             if (!isLocked(living)) {
                 event.setCanceled(true);
@@ -352,7 +375,7 @@ public class ModEvents {
                 if (!event.getLevel().isClientSide) {
                     if (!player.isCreative()) itemStack.shrink(1);
                     living.getPersistentData().putBoolean(LOCK_NBT_KEY, true);
-                    setStackSize(living, getStackSize(living));
+                    setStackSize(living, getStackSize(living)); // refresh name to show (*)
                     living.level().playSound(null, living.getX(), living.getY(), living.getZ(),
                             SoundEvents.IRON_TRAPDOOR_CLOSE, SoundSource.NEUTRAL, 0.8f, 1.5f);
                 }
@@ -360,25 +383,36 @@ public class ModEvents {
             return;
         }
 
-        // --- Shift + empty hand: return emerald OR split ---
+        // --- Shift + empty hand: return emerald OR split stack ---
         if (target instanceof LivingEntity living &&
                 player.isShiftKeyDown() &&
                 itemStack.isEmpty()) {
 
-            // 1) Emerald removal – no split
+            // 1) Emerald removal – do not split
             if (isLocked(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     living.getPersistentData().remove(LOCK_NBT_KEY);
-                    setStackSize(living, getStackSize(living));
+                    // Force name refresh to remove (*)
+                    if (ModConfig.SHOW_MOB_COUNT.get()) {
+                        int currentSize = getStackSize(living);
+                        Component newName = buildEntityName(living, currentSize);
+                        if (currentSize > 1) {
+                            living.setCustomName(newName);
+                            living.setCustomNameVisible(true);
+                        } else {
+                            living.setCustomName(null);
+                            living.setCustomNameVisible(false);
+                        }
+                    }
                     living.spawnAtLocation(new ItemStack(Items.EMERALD));
                     living.playSound(SoundEvents.ITEM_PICKUP, 0.5f, 1.0f);
                 }
                 return;
             }
 
-            // 2) Split
+            // 2) Split – only if stack size > 1
             int stackSize = getStackSize(living);
             if (stackSize > 1) {
                 event.setCanceled(true);
@@ -398,11 +432,13 @@ public class ModEvents {
                         newEntity.moveTo(living.getX(), living.getY(), living.getZ(),
                                 living.getYRot(), living.getXRot());
 
+                        // Copy baby state only if both are AgeableMob
                         if (living instanceof AgeableMob ageable && newLiving instanceof AgeableMob newAgeable) {
                             newAgeable.setBaby(ageable.isBaby());
                             newAgeable.setAge(ageable.getAge());
                         }
 
+                        // Copy sheep colour if applicable
                         if (living instanceof Sheep oldSheep && newLiving instanceof Sheep newSheep) {
                             newSheep.setColor(oldSheep.getColor());
                         }
@@ -414,6 +450,7 @@ public class ModEvents {
                         living.getPersistentData().putLong(SPLIT_TIME_NBT_KEY, gameTime);
                         newLiving.getPersistentData().putLong(SPLIT_TIME_NBT_KEY, gameTime);
 
+                        // Clear honey data from both halves to avoid unintended pairing
                         clearHoneyData(living);
                         clearHoneyData(newLiving);
 
@@ -432,7 +469,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 6. Chicken egg laying
+    // 6. Chicken egg laying multiplier
     // ==================================================
     @SubscribeEvent
     public void onChickenTick(LivingEvent.LivingTickEvent event) {
@@ -607,9 +644,11 @@ public class ModEvents {
 
     private boolean isCompatible(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
+        // Sheep colour
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
             if (sheepA.getColor() != sheepB.getColor()) return false;
         }
+        // Baby / adult state
         if (a instanceof AgeableMob ageA && b instanceof AgeableMob ageB) {
             if (ageA.isBaby() != ageB.isBaby()) return false;
         }
