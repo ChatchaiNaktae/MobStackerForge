@@ -47,11 +47,13 @@ public class ModEvents {
     private static final String LOCK_NBT_KEY = "MobStackerLocked";
     private static final String GENERATED_NAME_NBT = "MobStackerGeneratedName";
 
-    // --- NEW: breeding tags ---
+    // --- Breeding tags ---
     private static final String BREED_PLAYER_NBT = "MobStackerBreedPlayer";
     private static final String BREED_TIME_NBT = "MobStackerBreedTime";
-    private static final int BREED_TIMEOUT_TICKS = 600;   // 30 seconds
+    private static final int BREED_TIMEOUT_TICKS = 600;   // 30 seconds to find a partner
     private static final double BREED_PAIR_RADIUS = 10.0;
+    private static final String BREED_COOLDOWN_NBT = "MobStackerBreedCooldown";
+    private static final int BREED_COOLDOWN_TICKS = 6000; // 5 minutes cooldown after breeding
 
     private static final UUID HEALTH_MODIFIER_UUID = UUID.fromString("d05b8a0a-e555-4e0f-bf3a-f10e1346210f");
 
@@ -279,7 +281,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Interactions (NEW: locked‑mob breeding added)
+    // 5. Interactions (UPDATED: locked breeding – no parent loss)
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
@@ -352,10 +354,10 @@ public class ModEvents {
             return;
         }
 
-        // --- 🔥 NEW: Locked mob breeding ---
+        // --- 🔥 UPDATED: Locked mob breeding ---
         if (target instanceof Animal animal && isLocked(animal)) {
-            // Only adult animals can breed
-            if (animal.isBaby()) return;
+            if (animal.isBaby()) return; // babies can't breed
+            if (isOnBreedCooldown(animal)) return; // don't allow breeding during cooldown
 
             if (animal.isFood(itemStack)) {
                 event.setCanceled(true);
@@ -364,24 +366,23 @@ public class ModEvents {
                     CompoundTag data = animal.getPersistentData();
                     long now = animal.level().getGameTime();
 
-                    // If this animal already has an active breed tag, ignore (prevent self‑breeding)
+                    // Prevent self‑breeding if already marked
                     if (data.contains(BREED_PLAYER_NBT) && !isBreedExpired(animal)) return;
 
-                    // Look for a suitable partner nearby
+                    // Look for a compatible partner nearby
                     List<Animal> partners = animal.level().getEntitiesOfClass(
                             Animal.class,
                             animal.getBoundingBox().inflate(BREED_PAIR_RADIUS),
                             e -> e != animal && e.isAlive()
                                     && e.getType() == animal.getType()
-                                    && isLocked(e)
-                                    && !e.isBaby()
+                                    && isLocked(e) && !e.isBaby()
+                                    && !isOnBreedCooldown(e)
                                     && e.getPersistentData().contains(BREED_PLAYER_NBT)
                                     && !isBreedExpired(e)
                                     && e.getPersistentData().getString(BREED_PLAYER_NBT).equals(player.getUUID().toString())
                     );
 
                     if (!partners.isEmpty()) {
-                        // Found partner → breed
                         Animal partner = partners.get(0);
                         performBreeding(animal, partner, player);
                         clearBreedData(animal);
@@ -390,10 +391,8 @@ public class ModEvents {
                         // No partner yet – mark this animal
                         data.putString(BREED_PLAYER_NBT, player.getUUID().toString());
                         data.putLong(BREED_TIME_NBT, now);
-                        // Consume one breeding item
                         if (!player.isCreative()) itemStack.shrink(1);
-                        // Visual feedback: love mode particles
-                        animal.level().broadcastEntityEvent(animal, (byte) 18);
+                        animal.level().broadcastEntityEvent(animal, (byte) 18); // love particles
                         animal.playSound(SoundEvents.CHICKEN_EGG, 1.0F, 1.0F);
                     }
                 }
@@ -544,65 +543,69 @@ public class ModEvents {
     }
 
     // ==================================================
-    // UTILITY METHODS (including new breeding helper)
+    // UTILITY METHODS (updated breeding logic)
     // ==================================================
 
     /**
-     * Actually breeds two locked adult animals.
-     * Reduces both stacks and spawns a baby stack.
+     * Breeds two locked adult animals WITHOUT reducing their stacks.
+     * Baby stack size = (total parent count) / 2, rounded down to an even number.
+     * Both parents get a 5‑minute cooldown.
      */
     private void performBreeding(Animal parent1, Animal parent2, Player player) {
         ServerLevel level = (ServerLevel) parent1.level();
 
         int size1 = getStackSize(parent1);
         int size2 = getStackSize(parent2);
-        int breedCount = Math.min(size1, size2);
-        if (breedCount <= 0) return;
+        int total = size1 + size2;
+        int babySize = total / 2; // integer division automatically floors
 
-        // Reduce parent stacks, removing one animal per baby
-        int newSize1 = size1 - breedCount;
-        int newSize2 = size2 - breedCount;
+        if (babySize <= 0) return;
 
-        if (newSize1 <= 0) {
-            parent1.discard();
-        } else {
-            float hpRatio = parent1.getMaxHealth() > 0 ? parent1.getHealth() / parent1.getMaxHealth() : 1.0f;
-            setStackSize(parent1, newSize1);
-            parent1.setHealth(parent1.getMaxHealth() * hpRatio);
-        }
+        // Apply breeding cooldown to both parents
+        setBreedCooldown(parent1);
+        setBreedCooldown(parent2);
 
-        if (newSize2 <= 0) {
-            parent2.discard();
-        } else {
-            float hpRatio = parent2.getMaxHealth() > 0 ? parent2.getHealth() / parent2.getMaxHealth() : 1.0f;
-            setStackSize(parent2, newSize2);
-            parent2.setHealth(parent2.getMaxHealth() * hpRatio);
-        }
-
-        // Create baby stack
+        // Create baby stack near parent1
         EntityType<?> type = parent1.getType();
         Entity babyEntity = type.create(level);
         if (babyEntity instanceof AgeableMob baby) {
-            double x = (parent1.getX() + parent2.getX()) / 2.0;
-            double y = (parent1.getY() + parent2.getY()) / 2.0;
-            double z = (parent1.getZ() + parent2.getZ()) / 2.0;
+            // Position near parent1 with a small random offset
+            double x = parent1.getX() + (level.random.nextDouble() - 0.5) * 2.0;
+            double y = parent1.getY();
+            double z = parent1.getZ() + (level.random.nextDouble() - 0.5) * 2.0;
             baby.moveTo(x, y, z, level.random.nextFloat() * 360.0F, 0.0F);
 
             baby.setBaby(true);
             if (baby instanceof Animal animalBaby) {
-                animalBaby.setAge(-24000); // standard baby age
+                animalBaby.setAge(-24000); // standard baby duration
             }
 
-            setStackSize(baby, breedCount);
-            // Note: baby is not locked, so it can be locked later if desired.
+            setStackSize(baby, babySize);
+            // Baby is not locked (player can lock it later)
             baby.setHealth(baby.getMaxHealth());
 
             level.addFreshEntity(baby);
 
-            level.broadcastEntityEvent(parent1.isAlive() ? parent1 : parent2, (byte) 18);
+            // Breeding visuals and sound
+            level.broadcastEntityEvent(parent1, (byte) 18);
+            level.broadcastEntityEvent(parent2, (byte) 18);
             level.playSound(null, x, y, z,
                     SoundEvents.CHICKEN_EGG, SoundSource.NEUTRAL, 1.0f, 1.0f);
         }
+    }
+
+    // --- Breed cooldown helpers ---
+    private void setBreedCooldown(LivingEntity entity) {
+        entity.getPersistentData().putLong(BREED_COOLDOWN_NBT, entity.level().getGameTime());
+    }
+
+    private boolean isOnBreedCooldown(LivingEntity entity) {
+        CompoundTag data = entity.getPersistentData();
+        if (data.contains(BREED_COOLDOWN_NBT)) {
+            long lastBreed = data.getLong(BREED_COOLDOWN_NBT);
+            return entity.level().getGameTime() - lastBreed < BREED_COOLDOWN_TICKS;
+        }
+        return false;
     }
 
     private void clearBreedData(LivingEntity entity) {
@@ -620,7 +623,7 @@ public class ModEvents {
         return false;
     }
 
-    // --- rest of the utility methods (exactly as before) ---
+    // --- rest of utility methods (exactly as before) ---
     private void processItemStacking(ItemEntity currentItem, ServerLevel level) {
         if (!currentItem.isAlive()) return;
         ItemStack stack = currentItem.getItem();
