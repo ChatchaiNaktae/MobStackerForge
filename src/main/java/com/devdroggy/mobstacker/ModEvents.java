@@ -47,18 +47,17 @@ public class ModEvents {
     private static final String LOCK_NBT_KEY = "MobStackerLocked";
     private static final String GENERATED_NAME_NBT = "MobStackerGeneratedName";
 
-    // --- Breeding tags ---
     private static final String BREED_PLAYER_NBT = "MobStackerBreedPlayer";
     private static final String BREED_TIME_NBT = "MobStackerBreedTime";
-    private static final int BREED_TIMEOUT_TICKS = 600;   // 30 seconds to find a partner
+    private static final int BREED_TIMEOUT_TICKS = 600;
     private static final double BREED_PAIR_RADIUS = 10.0;
     private static final String BREED_COOLDOWN_NBT = "MobStackerBreedCooldown";
-    private static final int BREED_COOLDOWN_TICKS = 6000; // 5 minutes cooldown after breeding
+    private static final int BREED_COOLDOWN_TICKS = 6000; // 5 minutes
 
     private static final UUID HEALTH_MODIFIER_UUID = UUID.fromString("d05b8a0a-e555-4e0f-bf3a-f10e1346210f");
 
     // ==================================================
-    // 1. Mob Merging (unchanged)
+    // 1. Mob Merging
     // ==================================================
     @SubscribeEvent
     public void onLivingTick(LivingEvent.LivingTickEvent event) {
@@ -117,7 +116,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 2. Honey comb pairing (unchanged)
+    // 2. Honey comb pairing
     // ==================================================
     @SubscribeEvent
     public void onHoneyTick(LivingEvent.LivingTickEvent event) {
@@ -207,7 +206,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 3. Loot / XP (unchanged)
+    // 3. Loot / XP
     // ==================================================
     @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
@@ -263,7 +262,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 4. Item stacking (unchanged)
+    // 4. Item stacking
     // ==================================================
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
@@ -281,11 +280,18 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Interactions (UPDATED: locked breeding – no parent loss)
+    // 5. Interactions (FIXED: baby unlock + double breeding)
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
-        if (event.getHand() != InteractionHand.MAIN_HAND) return;
+        // Always cancel off‑hand interactions with locked animals to prevent vanilla shenanigans
+        if (event.getHand() != InteractionHand.MAIN_HAND) {
+            if (event.getTarget() instanceof Animal animal && isLocked(animal)) {
+                event.setCanceled(true);
+                event.setCancellationResult(InteractionResult.SUCCESS);
+            }
+            return;
+        }
 
         Entity target = event.getTarget();
         ItemStack itemStack = event.getItemStack();
@@ -338,7 +344,7 @@ public class ModEvents {
             }
         }
 
-        // --- Emerald lock (unchanged) ---
+        // --- Emerald lock ---
         if (itemStack.getItem() == Items.EMERALD && target instanceof LivingEntity living) {
             if (!isLocked(living)) {
                 event.setCanceled(true);
@@ -354,22 +360,26 @@ public class ModEvents {
             return;
         }
 
-        // --- 🔥 UPDATED: Locked mob breeding ---
+        // --- Locked mob breeding (only on food, babies/cooldown properly handled) ---
         if (target instanceof Animal animal && isLocked(animal)) {
-            if (animal.isBaby()) return; // babies can't breed
-            if (isOnBreedCooldown(animal)) return; // don't allow breeding during cooldown
-
             if (animal.isFood(itemStack)) {
+                // If baby or on our custom cooldown, cancel the event to block vanilla breeding
+                if (animal.isBaby() || isOnBreedCooldown(animal)) {
+                    event.setCanceled(true);
+                    event.setCancellationResult(InteractionResult.SUCCESS);
+                    return;
+                }
+
+                // Actual breeding logic
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     CompoundTag data = animal.getPersistentData();
                     long now = animal.level().getGameTime();
 
-                    // Prevent self‑breeding if already marked
+                    // Already marked, skip to prevent self‑breeding
                     if (data.contains(BREED_PLAYER_NBT) && !isBreedExpired(animal)) return;
 
-                    // Look for a compatible partner nearby
                     List<Animal> partners = animal.level().getEntitiesOfClass(
                             Animal.class,
                             animal.getBoundingBox().inflate(BREED_PAIR_RADIUS),
@@ -388,19 +398,20 @@ public class ModEvents {
                         clearBreedData(animal);
                         clearBreedData(partner);
                     } else {
-                        // No partner yet – mark this animal
+                        // Mark this animal as ready
                         data.putString(BREED_PLAYER_NBT, player.getUUID().toString());
                         data.putLong(BREED_TIME_NBT, now);
                         if (!player.isCreative()) itemStack.shrink(1);
-                        animal.level().broadcastEntityEvent(animal, (byte) 18); // love particles
+                        animal.level().broadcastEntityEvent(animal, (byte) 18);
                         animal.playSound(SoundEvents.CHICKEN_EGG, 1.0F, 1.0F);
                     }
                 }
                 return;
             }
+            // If not food, fall through to other handlers (honeycomb, shift+empty, etc.)
         }
 
-        // --- Honey Comb (unchanged) ---
+        // --- Honey Comb ---
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
             if (isLocked(living)) return;
 
@@ -439,11 +450,12 @@ public class ModEvents {
             return;
         }
 
-        // --- Shift + empty hand: return emerald OR split (unchanged) ---
+        // --- Shift + empty hand: return emerald OR split ---
         if (target instanceof LivingEntity living &&
                 player.isShiftKeyDown() &&
                 itemStack.isEmpty()) {
 
+            // 1) Emerald removal – works for any locked entity (babies included!)
             if (isLocked(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
@@ -468,6 +480,7 @@ public class ModEvents {
                 return;
             }
 
+            // 2) Split
             int stackSize = getStackSize(living);
             if (stackSize > 1) {
                 event.setCanceled(true);
@@ -522,7 +535,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 6. Chicken egg laying (unchanged)
+    // 6. Chicken egg laying
     // ==================================================
     @SubscribeEvent
     public void onChickenTick(LivingEvent.LivingTickEvent event) {
@@ -543,33 +556,24 @@ public class ModEvents {
     }
 
     // ==================================================
-    // UTILITY METHODS (updated breeding logic)
+    // UTILITY METHODS
     // ==================================================
-
-    /**
-     * Breeds two locked adult animals WITHOUT reducing their stacks.
-     * Baby stack size = (total parent count) / 2, rounded down to an even number.
-     * Both parents get a 5‑minute cooldown.
-     */
     private void performBreeding(Animal parent1, Animal parent2, Player player) {
         ServerLevel level = (ServerLevel) parent1.level();
 
         int size1 = getStackSize(parent1);
         int size2 = getStackSize(parent2);
         int total = size1 + size2;
-        int babySize = total / 2; // integer division automatically floors
+        int babySize = total / 2;
 
         if (babySize <= 0) return;
 
-        // Apply breeding cooldown to both parents
         setBreedCooldown(parent1);
         setBreedCooldown(parent2);
 
-        // Create baby stack near parent1
         EntityType<?> type = parent1.getType();
         Entity babyEntity = type.create(level);
         if (babyEntity instanceof AgeableMob baby) {
-            // Position near parent1 with a small random offset
             double x = parent1.getX() + (level.random.nextDouble() - 0.5) * 2.0;
             double y = parent1.getY();
             double z = parent1.getZ() + (level.random.nextDouble() - 0.5) * 2.0;
@@ -577,16 +581,14 @@ public class ModEvents {
 
             baby.setBaby(true);
             if (baby instanceof Animal animalBaby) {
-                animalBaby.setAge(-24000); // standard baby duration
+                animalBaby.setAge(-24000);
             }
 
             setStackSize(baby, babySize);
-            // Baby is not locked (player can lock it later)
             baby.setHealth(baby.getMaxHealth());
 
             level.addFreshEntity(baby);
 
-            // Breeding visuals and sound
             level.broadcastEntityEvent(parent1, (byte) 18);
             level.broadcastEntityEvent(parent2, (byte) 18);
             level.playSound(null, x, y, z,
@@ -594,7 +596,6 @@ public class ModEvents {
         }
     }
 
-    // --- Breed cooldown helpers ---
     private void setBreedCooldown(LivingEntity entity) {
         entity.getPersistentData().putLong(BREED_COOLDOWN_NBT, entity.level().getGameTime());
     }
@@ -623,7 +624,6 @@ public class ModEvents {
         return false;
     }
 
-    // --- rest of utility methods (exactly as before) ---
     private void processItemStacking(ItemEntity currentItem, ServerLevel level) {
         if (!currentItem.isAlive()) return;
         ItemStack stack = currentItem.getItem();
