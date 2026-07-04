@@ -46,10 +46,17 @@ public class ModEvents {
 
     private static final String LOCK_NBT_KEY = "MobStackerLocked";
     private static final String GENERATED_NAME_NBT = "MobStackerGeneratedName";
+
+    // --- NEW: breeding tags ---
+    private static final String BREED_PLAYER_NBT = "MobStackerBreedPlayer";
+    private static final String BREED_TIME_NBT = "MobStackerBreedTime";
+    private static final int BREED_TIMEOUT_TICKS = 600;   // 30 seconds
+    private static final double BREED_PAIR_RADIUS = 10.0;
+
     private static final UUID HEALTH_MODIFIER_UUID = UUID.fromString("d05b8a0a-e555-4e0f-bf3a-f10e1346210f");
 
     // ==================================================
-    // 1. Mob Merging (with split cooldown, name protection, monster config)
+    // 1. Mob Merging (unchanged)
     // ==================================================
     @SubscribeEvent
     public void onLivingTick(LivingEvent.LivingTickEvent event) {
@@ -62,13 +69,11 @@ public class ModEvents {
 
         if (entity instanceof Monster && !ModConfig.ENABLE_MONSTER_MERGING.get()) return;
 
-        // Split cooldown particles and skip merging
         if (hasRecentSplit(entity)) {
             spawnSplitCooldownParticles(entity);
             return;
         }
 
-        // Skip honeyed or locked mobs (normal merging blocked)
         if (hasHoneyData(entity) || isLocked(entity)) return;
 
         double radius = ModConfig.MOB_RADIUS.get();
@@ -103,19 +108,18 @@ public class ModEvents {
 
     private void spawnSplitCooldownParticles(LivingEntity entity) {
         if (!(entity.level() instanceof ServerLevel serverLevel)) return;
-        if (entity.tickCount % 5 != 0) return; // every 5 ticks
+        if (entity.tickCount % 5 != 0) return;
         serverLevel.sendParticles(ParticleTypes.SMOKE,
                 entity.getX(), entity.getY() + entity.getBbHeight() * 0.7, entity.getZ(),
                 1, 0.2, 0.1, 0.2, 0.01);
     }
 
     // ==================================================
-    // 2. Honey comb pairing (optimised, ignores name compatibility)
+    // 2. Honey comb pairing (unchanged)
     // ==================================================
     @SubscribeEvent
     public void onHoneyTick(LivingEvent.LivingTickEvent event) {
         LivingEntity entity = event.getEntity();
-        // Only process actual mobs (performance)
         if (!(entity instanceof Mob) || !entity.isAlive()) return;
         if (entity.level().isClientSide) return;
 
@@ -174,7 +178,6 @@ public class ModEvents {
                 } else {
                     int myStack = getStackSize(mob);
                     int otherStack = getStackSize(partner);
-                    // Merge – discards any previous custom name
                     setStackSize(mob, myStack + otherStack);
 
                     serverLevel.sendParticles(ParticleTypes.HEART,
@@ -202,7 +205,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 3. Loot / XP multiplication (with immediate item merging)
+    // 3. Loot / XP (unchanged)
     // ==================================================
     @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
@@ -258,7 +261,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 4. Item stacking
+    // 4. Item stacking (unchanged)
     // ==================================================
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
@@ -276,7 +279,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Interactions (sheep, honey comb, emerald, split)
+    // 5. Interactions (NEW: locked‑mob breeding added)
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
@@ -333,7 +336,72 @@ public class ModEvents {
             }
         }
 
-        // --- Honey Comb (ignores lock for now? still blocked) ---
+        // --- Emerald lock (unchanged) ---
+        if (itemStack.getItem() == Items.EMERALD && target instanceof LivingEntity living) {
+            if (!isLocked(living)) {
+                event.setCanceled(true);
+                event.setCancellationResult(InteractionResult.SUCCESS);
+                if (!event.getLevel().isClientSide) {
+                    if (!player.isCreative()) itemStack.shrink(1);
+                    living.getPersistentData().putBoolean(LOCK_NBT_KEY, true);
+                    setStackSize(living, getStackSize(living));
+                    living.level().playSound(null, living.getX(), living.getY(), living.getZ(),
+                            SoundEvents.IRON_TRAPDOOR_CLOSE, SoundSource.NEUTRAL, 0.8f, 1.5f);
+                }
+            }
+            return;
+        }
+
+        // --- 🔥 NEW: Locked mob breeding ---
+        if (target instanceof Animal animal && isLocked(animal)) {
+            // Only adult animals can breed
+            if (animal.isBaby()) return;
+
+            if (animal.isFood(itemStack)) {
+                event.setCanceled(true);
+                event.setCancellationResult(InteractionResult.SUCCESS);
+                if (!event.getLevel().isClientSide) {
+                    CompoundTag data = animal.getPersistentData();
+                    long now = animal.level().getGameTime();
+
+                    // If this animal already has an active breed tag, ignore (prevent self‑breeding)
+                    if (data.contains(BREED_PLAYER_NBT) && !isBreedExpired(animal)) return;
+
+                    // Look for a suitable partner nearby
+                    List<Animal> partners = animal.level().getEntitiesOfClass(
+                            Animal.class,
+                            animal.getBoundingBox().inflate(BREED_PAIR_RADIUS),
+                            e -> e != animal && e.isAlive()
+                                    && e.getType() == animal.getType()
+                                    && isLocked(e)
+                                    && !e.isBaby()
+                                    && e.getPersistentData().contains(BREED_PLAYER_NBT)
+                                    && !isBreedExpired(e)
+                                    && e.getPersistentData().getString(BREED_PLAYER_NBT).equals(player.getUUID().toString())
+                    );
+
+                    if (!partners.isEmpty()) {
+                        // Found partner → breed
+                        Animal partner = partners.get(0);
+                        performBreeding(animal, partner, player);
+                        clearBreedData(animal);
+                        clearBreedData(partner);
+                    } else {
+                        // No partner yet – mark this animal
+                        data.putString(BREED_PLAYER_NBT, player.getUUID().toString());
+                        data.putLong(BREED_TIME_NBT, now);
+                        // Consume one breeding item
+                        if (!player.isCreative()) itemStack.shrink(1);
+                        // Visual feedback: love mode particles
+                        animal.level().broadcastEntityEvent(animal, (byte) 18);
+                        animal.playSound(SoundEvents.CHICKEN_EGG, 1.0F, 1.0F);
+                    }
+                }
+                return;
+            }
+        }
+
+        // --- Honey Comb (unchanged) ---
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
             if (isLocked(living)) return;
 
@@ -372,34 +440,16 @@ public class ModEvents {
             return;
         }
 
-        // --- Emerald lock ---
-        if (itemStack.getItem() == Items.EMERALD && target instanceof LivingEntity living) {
-            if (!isLocked(living)) {
-                event.setCanceled(true);
-                event.setCancellationResult(InteractionResult.SUCCESS);
-                if (!event.getLevel().isClientSide) {
-                    if (!player.isCreative()) itemStack.shrink(1);
-                    living.getPersistentData().putBoolean(LOCK_NBT_KEY, true);
-                    setStackSize(living, getStackSize(living));
-                    living.level().playSound(null, living.getX(), living.getY(), living.getZ(),
-                            SoundEvents.IRON_TRAPDOOR_CLOSE, SoundSource.NEUTRAL, 0.8f, 1.5f);
-                }
-            }
-            return;
-        }
-
-        // --- Shift + empty hand: return emerald OR split ---
+        // --- Shift + empty hand: return emerald OR split (unchanged) ---
         if (target instanceof LivingEntity living &&
                 player.isShiftKeyDown() &&
                 itemStack.isEmpty()) {
 
-            // 1) Emerald removal – no split
             if (isLocked(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     living.getPersistentData().remove(LOCK_NBT_KEY);
-                    // Refresh name to remove (*)
                     if (ModConfig.SHOW_MOB_COUNT.get()) {
                         int currentSize = getStackSize(living);
                         Component newName = buildEntityName(living, currentSize);
@@ -419,7 +469,6 @@ public class ModEvents {
                 return;
             }
 
-            // 2) Split
             int stackSize = getStackSize(living);
             if (stackSize > 1) {
                 event.setCanceled(true);
@@ -474,7 +523,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 6. Chicken egg laying
+    // 6. Chicken egg laying (unchanged)
     // ==================================================
     @SubscribeEvent
     public void onChickenTick(LivingEvent.LivingTickEvent event) {
@@ -495,8 +544,83 @@ public class ModEvents {
     }
 
     // ==================================================
-    // UTILITY METHODS
+    // UTILITY METHODS (including new breeding helper)
     // ==================================================
+
+    /**
+     * Actually breeds two locked adult animals.
+     * Reduces both stacks and spawns a baby stack.
+     */
+    private void performBreeding(Animal parent1, Animal parent2, Player player) {
+        ServerLevel level = (ServerLevel) parent1.level();
+
+        int size1 = getStackSize(parent1);
+        int size2 = getStackSize(parent2);
+        int breedCount = Math.min(size1, size2);
+        if (breedCount <= 0) return;
+
+        // Reduce parent stacks, removing one animal per baby
+        int newSize1 = size1 - breedCount;
+        int newSize2 = size2 - breedCount;
+
+        if (newSize1 <= 0) {
+            parent1.discard();
+        } else {
+            float hpRatio = parent1.getMaxHealth() > 0 ? parent1.getHealth() / parent1.getMaxHealth() : 1.0f;
+            setStackSize(parent1, newSize1);
+            parent1.setHealth(parent1.getMaxHealth() * hpRatio);
+        }
+
+        if (newSize2 <= 0) {
+            parent2.discard();
+        } else {
+            float hpRatio = parent2.getMaxHealth() > 0 ? parent2.getHealth() / parent2.getMaxHealth() : 1.0f;
+            setStackSize(parent2, newSize2);
+            parent2.setHealth(parent2.getMaxHealth() * hpRatio);
+        }
+
+        // Create baby stack
+        EntityType<?> type = parent1.getType();
+        Entity babyEntity = type.create(level);
+        if (babyEntity instanceof AgeableMob baby) {
+            double x = (parent1.getX() + parent2.getX()) / 2.0;
+            double y = (parent1.getY() + parent2.getY()) / 2.0;
+            double z = (parent1.getZ() + parent2.getZ()) / 2.0;
+            baby.moveTo(x, y, z, level.random.nextFloat() * 360.0F, 0.0F);
+
+            baby.setBaby(true);
+            if (baby instanceof Animal animalBaby) {
+                animalBaby.setAge(-24000); // standard baby age
+            }
+
+            setStackSize(baby, breedCount);
+            // Note: baby is not locked, so it can be locked later if desired.
+            baby.setHealth(baby.getMaxHealth());
+
+            level.addFreshEntity(baby);
+
+            level.broadcastEntityEvent(parent1.isAlive() ? parent1 : parent2, (byte) 18);
+            level.playSound(null, x, y, z,
+                    SoundEvents.CHICKEN_EGG, SoundSource.NEUTRAL, 1.0f, 1.0f);
+        }
+    }
+
+    private void clearBreedData(LivingEntity entity) {
+        CompoundTag data = entity.getPersistentData();
+        data.remove(BREED_PLAYER_NBT);
+        data.remove(BREED_TIME_NBT);
+    }
+
+    private boolean isBreedExpired(LivingEntity entity) {
+        CompoundTag data = entity.getPersistentData();
+        if (data.contains(BREED_TIME_NBT)) {
+            long breedTime = data.getLong(BREED_TIME_NBT);
+            return entity.level().getGameTime() - breedTime > BREED_TIMEOUT_TICKS;
+        }
+        return false;
+    }
+
+    // --- rest of the utility methods (exactly as before) ---
     private void processItemStacking(ItemEntity currentItem, ServerLevel level) {
         if (!currentItem.isAlive()) return;
         ItemStack stack = currentItem.getItem();
@@ -649,13 +773,9 @@ public class ModEvents {
         };
     }
 
-    // Normal compatibility – blocks named mobs
     private boolean isCompatible(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
-
-        // Prevent merging if either has a player-given custom name
         if (hasPlayerCustomName(a) || hasPlayerCustomName(b)) return false;
-
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
             if (sheepA.getColor() != sheepB.getColor()) return false;
         }
@@ -665,7 +785,6 @@ public class ModEvents {
         return true;
     }
 
-    // Compatibility ignoring custom names – used for honey pairing
     private boolean isCompatibleIgnoringName(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
