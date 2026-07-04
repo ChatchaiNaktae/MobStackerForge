@@ -415,7 +415,8 @@ public class ModEvents {
 
             // Horses, donkeys, mules, llamas, bees are excluded even from honey
             if (living instanceof Horse || living instanceof Donkey || living instanceof Mule
-                    || living instanceof Llama || living instanceof Bee) return;
+                    || living instanceof Llama || living instanceof Bee || living instanceof Warden 
+                || living instanceof Wither || living instanceof ElderGuardian || living instanceof Vindicator || living instanceof Evoker) return;
 
             CompoundTag data = living.getPersistentData();
             if (!data.contains(HONEY_PLAYER_NBT) || isHoneyExpired(living)) {
@@ -787,7 +788,8 @@ public class ModEvents {
 
         // Never stack: horses, donkeys, mules, llamas, bees
         if (a instanceof Horse || a instanceof Donkey || a instanceof Mule
-                || a instanceof Llama || a instanceof Bee) {
+                || a instanceof Llama || a instanceof Bee || a instanceof Warden || a instanceof Wither || a instanceof ElderGuardian 
+           || living instanceof Vindicator || living instanceof Evoker) {
             return false;
         }
 
