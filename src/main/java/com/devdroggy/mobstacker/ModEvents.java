@@ -59,7 +59,7 @@ public class ModEvents {
         if (!(entity instanceof Monster) && !(entity instanceof Animal)) return;
         if (!entity.isAlive()) return;
 
-        // Skip entities that are temporarily immune (freshly split, honeyed, or locked)
+        // Skip entities that are temporarily immune
         if (hasRecentSplit(entity) || hasHoneyData(entity) || isLocked(entity)) return;
 
         double radius = ModConfig.MOB_RADIUS.get();
@@ -75,7 +75,10 @@ public class ModEvents {
         if (neighbors.size() + 1 < minThreshold) return;
 
         for (LivingEntity neighbor : neighbors) {
-            if (entity.isBaby() != neighbor.isBaby()) continue;
+            // Safe baby check – only compare if both are AgeableMob
+            if (entity instanceof AgeableMob ageable && neighbor instanceof AgeableMob neighborAgeable) {
+                if (ageable.isBaby() != neighborAgeable.isBaby()) continue;
+            }
 
             int myStack = getStackSize(entity);
             int otherStack = getStackSize(neighbor);
@@ -96,7 +99,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 2. Honey comb pairing & following logic (inside tick)
+    // 2. Honey comb pairing & following (merged into LivingTick)
     // ==================================================
     @SubscribeEvent
     public void onHoneyTick(LivingEvent.LivingTickEvent event) {
@@ -104,13 +107,11 @@ public class ModEvents {
         if (entity.level().isClientSide || !entity.isAlive()) return;
 
         CompoundTag data = entity.getPersistentData();
-        if (!data.contains(HONEY_PLAYER_NBT)) return; // not honeyed
+        if (!data.contains(HONEY_PLAYER_NBT)) return;
 
         if (data.contains(HONEY_PARTNER_NBT)) {
-            // ---- Engaged (has partner) ----
             handleEngagedMob(entity, data);
         } else {
-            // ---- Waiting (follow player, timeout, spawn sparks) ----
             handleWaitingMob(entity, data);
         }
     }
@@ -119,20 +120,22 @@ public class ModEvents {
         long currentTime = mob.level().getGameTime();
         long honeyTime = data.getLong(HONEY_TIME_NBT);
 
-        // Timeout check
+        // Timeout
         if (currentTime - honeyTime > HONEY_TIMEOUT_TICKS) {
             clearHoneyData(mob);
             return;
         }
 
-        // Follow the player who honeyed
-        UUID playerUUID = UUID.fromString(data.getString(HONEY_PLAYER_NBT));
-        Player player = mob.level().getPlayerByUUID(playerUUID);
-        if (player != null && player.isAlive() && mob.distanceToSqr(player) > 2.0) {
-            mob.getNavigation().moveTo(player, 1.2);
+        // Follow the player (only if Mob)
+        if (mob instanceof Mob mobEntity) {
+            UUID playerUUID = UUID.fromString(data.getString(HONEY_PLAYER_NBT));
+            Player player = mob.level().getPlayerByUUID(playerUUID);
+            if (player != null && player.isAlive() && mob.distanceToSqr(player) > 2.0) {
+                mobEntity.getNavigation().moveTo(player, 1.2);
+            }
         }
 
-        // Yellow sparkles every 5 ticks
+        // Yellow sparkles
         if (mob.tickCount % 5 == 0 && mob.level() instanceof ServerLevel serverLevel) {
             serverLevel.sendParticles(ParticleTypes.WAX_ON,
                     mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(),
@@ -145,40 +148,36 @@ public class ModEvents {
         if (mob.level() instanceof ServerLevel serverLevel) {
             Entity partnerEntity = serverLevel.getEntity(partnerUUID);
             if (!(partnerEntity instanceof LivingEntity partner) || !partner.isAlive()) {
-                // Partner gone, remove honey data
                 clearHoneyData(mob);
                 return;
             }
 
-            // Move towards partner
-            double dist = mob.distanceToSqr(partner);
-            if (dist > 2.0) {
-                mob.getNavigation().moveTo(partner, 1.5);
-                // Hearts while moving
-                if (mob.tickCount % 3 == 0) {
+            // Move toward partner (only if Mob)
+            if (mob instanceof Mob mobEntity && partner instanceof Mob) {
+                double dist = mob.distanceToSqr(partner);
+                if (dist > 2.0) {
+                    mobEntity.getNavigation().moveTo(partner, 1.5);
+                    if (mob.tickCount % 3 == 0) {
+                        serverLevel.sendParticles(ParticleTypes.HEART,
+                                mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(),
+                                1, 0.3, 0.1, 0.3, 0.01);
+                    }
+                } else {
+                    // Close enough – merge
+                    int myStack = getStackSize(mob);
+                    int otherStack = getStackSize(partner);
+
+                    setStackSize(mob, myStack + otherStack);
+
                     serverLevel.sendParticles(ParticleTypes.HEART,
-                            mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(),
-                            1, 0.3, 0.1, 0.3, 0.01);
+                            mob.getX(), mob.getY() + 0.5, mob.getZ(),
+                            5, 0.3, 0.1, 0.3, 0.1);
+                    serverLevel.playSound(null, mob.getX(), mob.getY(), mob.getZ(),
+                            SoundEvents.CHICKEN_EGG, SoundSource.NEUTRAL, 1.0f, 1.2f);
+
+                    clearHoneyData(mob);
+                    partner.discard();
                 }
-            } else {
-                // Close enough -> merge!
-                int myStack = getStackSize(mob);
-                int otherStack = getStackSize(partner);
-
-                // Combine into this mob
-                setStackSize(mob, myStack + otherStack);
-
-                // Merge particles + sound
-                serverLevel.sendParticles(ParticleTypes.HEART,
-                        mob.getX(), mob.getY() + 0.5, mob.getZ(),
-                        5, 0.3, 0.1, 0.3, 0.1);
-                serverLevel.playSound(null, mob.getX(), mob.getY(), mob.getZ(),
-                        SoundEvents.CHICKEN_EGG, SoundSource.NEUTRAL, 1.0f, 1.2f);
-
-                // Clear honey data from the surviving mob
-                clearHoneyData(mob);
-                // Discard the partner
-                partner.discard();
             }
         }
     }
@@ -195,7 +194,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 3. Loot / XP multiplication (unchanged)
+    // 3. Loot / XP multiplication
     // ==================================================
     @SubscribeEvent
     public void onLivingDrops(LivingDropsEvent event) {
@@ -243,7 +242,7 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 4. Item stacking (unchanged)
+    // 4. Item stacking
     // ==================================================
     @SubscribeEvent
     public void onLevelTick(TickEvent.LevelTickEvent event) {
@@ -269,7 +268,7 @@ public class ModEvents {
         ItemStack itemStack = event.getItemStack();
         Player player = event.getEntity();
 
-        // --- Sheep shearing / dyeing (existing, with split cooldown fix) ---
+        // --- Sheep shearing / dyeing (with split cooldown fix) ---
         if (target instanceof Sheep sheep) {
             int stackSize = getStackSize(sheep);
 
@@ -320,46 +319,39 @@ public class ModEvents {
 
         // --- Honey Comb on any LivingEntity ---
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
-            if (isLocked(living)) return; // locked mobs cannot be honeyed (optional)
+            if (isLocked(living)) return;
 
             CompoundTag data = living.getPersistentData();
-            // Only allow if not already honeyed or previous honey expired
             if (!data.contains(HONEY_PLAYER_NBT) || isHoneyExpired(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     if (!player.isCreative()) itemStack.shrink(1);
 
-                    // Store honey state
                     data.putString(HONEY_PLAYER_NBT, player.getUUID().toString());
                     data.putLong(HONEY_TIME_NBT, living.level().getGameTime());
-                    data.remove(HONEY_PARTNER_NBT); // ensure no old partner
+                    data.remove(HONEY_PARTNER_NBT);
 
-                    // Look for another honeyed mob of the same player, type, compatibility, within radius
-                    Player honeyPlayer = player;
+                    // Look for another honeyed mob of same type/compatibility
                     List<LivingEntity> candidates = living.level().getEntitiesOfClass(
                             LivingEntity.class,
                             living.getBoundingBox().inflate(HONEY_PAIR_RADIUS),
                             e -> e != living && e.isAlive() && e.getType() == living.getType()
                                     && isCompatible(living, e) && hasHoneyData(e)
                                     && !e.getPersistentData().contains(HONEY_PARTNER_NBT)
-                                    && e.getPersistentData().getString(HONEY_PLAYER_NBT).equals(honeyPlayer.getUUID().toString())
+                                    && e.getPersistentData().getString(HONEY_PLAYER_NBT).equals(player.getUUID().toString())
                     );
 
                     if (!candidates.isEmpty()) {
-                        // Pair with the closest candidate
                         LivingEntity partner = candidates.get(0);
-                        // Mark both as paired
                         data.putString(HONEY_PARTNER_NBT, partner.getUUID().toString());
                         partner.getPersistentData().putString(HONEY_PARTNER_NBT, living.getUUID().toString());
 
-                        // Play a sound to indicate pairing
                         if (living.level() instanceof ServerLevel serverLevel) {
                             serverLevel.playSound(null, living.getX(), living.getY(), living.getZ(),
                                     SoundEvents.AMETHYST_BLOCK_CHIME, SoundSource.NEUTRAL, 1.0f, 1.5f);
                         }
                     }
-                    // (if no partner found, the mob simply waits and follows the player)
                 }
             }
             return;
@@ -373,9 +365,7 @@ public class ModEvents {
                 if (!event.getLevel().isClientSide) {
                     if (!player.isCreative()) itemStack.shrink(1);
                     living.getPersistentData().putBoolean(LOCK_NBT_KEY, true);
-                    // Refresh name to show (*)
-                    setStackSize(living, getStackSize(living));
-                    // Sound
+                    setStackSize(living, getStackSize(living)); // refresh name
                     living.level().playSound(null, living.getX(), living.getY(), living.getZ(),
                             SoundEvents.IRON_TRAPDOOR_CLOSE, SoundSource.NEUTRAL, 0.8f, 1.5f);
                 }
@@ -394,9 +384,7 @@ public class ModEvents {
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     living.getPersistentData().remove(LOCK_NBT_KEY);
-                    // Refresh name to remove (*)
-                    setStackSize(living, getStackSize(living));
-                    // Drop the emerald
+                    setStackSize(living, getStackSize(living)); // refresh name
                     living.spawnAtLocation(new ItemStack(Items.EMERALD));
                     living.playSound(SoundEvents.ITEM_PICKUP, 0.5f, 1.0f);
                 }
@@ -412,7 +400,6 @@ public class ModEvents {
                     int half = stackSize / 2;
                     int remaining = stackSize - half;
 
-                    // Preserve health ratio on the original entity
                     float healthRatio = living.getHealth() / living.getMaxHealth();
 
                     setStackSize(living, remaining);
@@ -424,15 +411,18 @@ public class ModEvents {
                         newEntity.moveTo(living.getX(), living.getY(), living.getZ(),
                                 living.getYRot(), living.getXRot());
 
-                        newLiving.setBaby(living.isBaby());
-                        newLiving.setAge(living.getAge());
+                        // Copy baby state only if both are AgeableMob
+                        if (living instanceof AgeableMob ageable && newLiving instanceof AgeableMob newAgeable) {
+                            newAgeable.setBaby(ageable.isBaby());
+                            newAgeable.setAge(ageable.getAge());
+                        }
 
+                        // Copy sheep colour if applicable
                         if (living instanceof Sheep oldSheep && newLiving instanceof Sheep newSheep) {
                             newSheep.setColor(oldSheep.getColor());
                         }
 
                         setStackSize(newLiving, half);
-                        // Give the new entity the same health ratio (or full – you decide)
                         newLiving.setHealth(newLiving.getMaxHealth() * healthRatio);
 
                         long gameTime = living.level().getGameTime();
@@ -541,7 +531,7 @@ public class ModEvents {
     }
 
     private void setStackSize(LivingEntity entity, int size) {
-        if (getStackSize(entity) == size && !entity.getPersistentData().contains(LOCK_NBT_KEY)) return; // allow refresh for lock
+        if (getStackSize(entity) == size && !entity.getPersistentData().contains(LOCK_NBT_KEY)) return;
 
         entity.getPersistentData().putInt(STACK_NBT_KEY, size);
 
@@ -569,7 +559,7 @@ public class ModEvents {
             String colorName = sheep.getColor().getName().substring(0, 1).toUpperCase() + sheep.getColor().getName().substring(1);
             name.append(Component.literal("(" + colorName + ") ").withStyle(ChatFormatting.GRAY));
         }
-        if (entity.isBaby()) {
+        if (entity instanceof AgeableMob ageable && ageable.isBaby()) {
             name.append(Component.literal("Baby ").withStyle(ChatFormatting.WHITE));
         }
 
@@ -580,7 +570,6 @@ public class ModEvents {
                 .append(Component.literal(String.valueOf(stackSize)).withStyle(ChatFormatting.GOLD).withStyle(ChatFormatting.ITALIC));
         }
 
-        // Lock indicator
         if (isLocked(entity)) {
             name.append(Component.literal(" (*)").withStyle(ChatFormatting.RED));
         }
@@ -644,12 +633,10 @@ public class ModEvents {
         return false;
     }
 
-    // --- Emerald lock helpers ---
     private boolean isLocked(LivingEntity entity) {
         return entity.getPersistentData().getBoolean(LOCK_NBT_KEY);
     }
 
-    // --- Honey helpers ---
     private boolean isHoneyExpired(LivingEntity entity) {
         CompoundTag data = entity.getPersistentData();
         if (data.contains(HONEY_TIME_NBT)) {
