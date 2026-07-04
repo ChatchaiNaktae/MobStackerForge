@@ -16,8 +16,10 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ambient.Bat;
 import net.minecraft.world.entity.animal.*;
 import net.minecraft.world.entity.animal.horse.*;
+import net.minecraft.world.entity.boss.wither.WitherBoss;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.*;
+import net.minecraft.world.entity.monster.warden.Warden;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.ItemLike;
@@ -347,7 +349,7 @@ public class ModEvents {
         }
 
         // --- Emerald lock ---
-        if (itemStack.getItem() == Items.EMERALD && target instanceof LivingEntity living) {
+        if (itemStack.getItem() == Items.IRON_NUGGET && target instanceof LivingEntity living) {
             if (!isLocked(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
@@ -413,10 +415,10 @@ public class ModEvents {
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
             if (isLocked(living) || !isStackableMob(living)) return;
 
-            // Horses, donkeys, mules, llamas, bees are excluded even from honey
+            // Horses, donkeys, mules, llamas, bees, warden, wither, elder guardian, vindicator, evoker are excluded even from honey
             if (living instanceof Horse || living instanceof Donkey || living instanceof Mule
-                    || living instanceof Llama || living instanceof Bee || living instanceof Warden 
-                || living instanceof Wither || living instanceof ElderGuardian || living instanceof Vindicator || living instanceof Evoker) return;
+                    || living instanceof Llama || living instanceof Bee || living instanceof Warden
+                || living instanceof WitherBoss || living instanceof ElderGuardian || living instanceof Vindicator || living instanceof Evoker) return;
 
             CompoundTag data = living.getPersistentData();
             if (!data.contains(HONEY_PLAYER_NBT) || isHoneyExpired(living)) {
@@ -786,10 +788,10 @@ public class ModEvents {
     private boolean isCompatible(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
 
-        // Never stack: horses, donkeys, mules, llamas, bees
+        // Never stack: horses, donkeys, mules, llamas, bees, warden, wither, elder guardian, vindicator, evoker
         if (a instanceof Horse || a instanceof Donkey || a instanceof Mule
-                || a instanceof Llama || a instanceof Bee || a instanceof Warden || a instanceof Wither || a instanceof ElderGuardian 
-           || living instanceof Vindicator || living instanceof Evoker) {
+                || a instanceof Llama || a instanceof Bee || a instanceof Warden || a instanceof WitherBoss || a instanceof ElderGuardian
+                || a instanceof Vindicator || a instanceof Evoker) {
             return false;
         }
 
