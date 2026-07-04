@@ -13,11 +13,11 @@ import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.animal.Animal;
-import net.minecraft.world.entity.animal.Chicken;
-import net.minecraft.world.entity.animal.Sheep;
+import net.minecraft.world.entity.ambient.Bat;
+import net.minecraft.world.entity.animal.*;
+import net.minecraft.world.entity.animal.horse.*;
 import net.minecraft.world.entity.item.ItemEntity;
-import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.monster.*;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.ItemLike;
@@ -65,9 +65,12 @@ public class ModEvents {
 
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide || CHECK_INTERVAL <= 0 || entity.tickCount % CHECK_INTERVAL != 0) return;
-        if (!(entity instanceof Monster) && !(entity instanceof Animal)) return;
         if (!entity.isAlive()) return;
 
+        // Only merge stackable mob types
+        if (!isStackableMob(entity)) return;
+
+        // Hostile mobs can be disabled via config
         if (entity instanceof Monster && !ModConfig.ENABLE_MONSTER_MERGING.get()) return;
 
         if (hasRecentSplit(entity)) {
@@ -280,11 +283,10 @@ public class ModEvents {
     }
 
     // ==================================================
-    // 5. Interactions (FIXED: baby unlock + double breeding)
+    // 5. Interactions
     // ==================================================
     @SubscribeEvent
     public void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
-        // Always cancel off‑hand interactions with locked animals to prevent vanilla shenanigans
         if (event.getHand() != InteractionHand.MAIN_HAND) {
             if (event.getTarget() instanceof Animal animal && isLocked(animal)) {
                 event.setCanceled(true);
@@ -360,24 +362,22 @@ public class ModEvents {
             return;
         }
 
-        // --- Locked mob breeding (only on food, babies/cooldown properly handled) ---
+        // --- Locked mob breeding (only on food, proper checks) ---
         if (target instanceof Animal animal && isLocked(animal)) {
             if (animal.isFood(itemStack)) {
-                // If baby or on our custom cooldown, cancel the event to block vanilla breeding
+                // Babies and cooldown blocks all breeding (mod + vanilla)
                 if (animal.isBaby() || isOnBreedCooldown(animal)) {
                     event.setCanceled(true);
                     event.setCancellationResult(InteractionResult.SUCCESS);
                     return;
                 }
 
-                // Actual breeding logic
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
                 if (!event.getLevel().isClientSide) {
                     CompoundTag data = animal.getPersistentData();
                     long now = animal.level().getGameTime();
 
-                    // Already marked, skip to prevent self‑breeding
                     if (data.contains(BREED_PLAYER_NBT) && !isBreedExpired(animal)) return;
 
                     List<Animal> partners = animal.level().getEntitiesOfClass(
@@ -398,7 +398,6 @@ public class ModEvents {
                         clearBreedData(animal);
                         clearBreedData(partner);
                     } else {
-                        // Mark this animal as ready
                         data.putString(BREED_PLAYER_NBT, player.getUUID().toString());
                         data.putLong(BREED_TIME_NBT, now);
                         if (!player.isCreative()) itemStack.shrink(1);
@@ -408,12 +407,15 @@ public class ModEvents {
                 }
                 return;
             }
-            // If not food, fall through to other handlers (honeycomb, shift+empty, etc.)
         }
 
-        // --- Honey Comb ---
+        // --- Honey Comb (works only on stackable mobs that are not locked) ---
         if (itemStack.getItem() == Items.HONEYCOMB && target instanceof LivingEntity living) {
-            if (isLocked(living)) return;
+            if (isLocked(living) || !isStackableMob(living)) return;
+
+            // Horses, donkeys, mules, llamas, bees are excluded even from honey
+            if (living instanceof Horse || living instanceof Donkey || living instanceof Mule
+                    || living instanceof Llama || living instanceof Bee) return;
 
             CompoundTag data = living.getPersistentData();
             if (!data.contains(HONEY_PLAYER_NBT) || isHoneyExpired(living)) {
@@ -455,7 +457,6 @@ public class ModEvents {
                 player.isShiftKeyDown() &&
                 itemStack.isEmpty()) {
 
-            // 1) Emerald removal – works for any locked entity (babies included!)
             if (isLocked(living)) {
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
@@ -480,7 +481,6 @@ public class ModEvents {
                 return;
             }
 
-            // 2) Split
             int stackSize = getStackSize(living);
             if (stackSize > 1) {
                 event.setCanceled(true);
@@ -558,14 +558,21 @@ public class ModEvents {
     // ==================================================
     // UTILITY METHODS
     // ==================================================
+
+    /** Determines whether a mob type is allowed to stack at all. */
+    private boolean isStackableMob(LivingEntity entity) {
+        return entity instanceof Monster
+            || entity instanceof Animal
+            || entity instanceof Bat
+            || entity instanceof WaterAnimal;
+    }
+
     private void performBreeding(Animal parent1, Animal parent2, Player player) {
         ServerLevel level = (ServerLevel) parent1.level();
-
         int size1 = getStackSize(parent1);
         int size2 = getStackSize(parent2);
         int total = size1 + size2;
         int babySize = total / 2;
-
         if (babySize <= 0) return;
 
         setBreedCooldown(parent1);
@@ -588,7 +595,6 @@ public class ModEvents {
             baby.setHealth(baby.getMaxHealth());
 
             level.addFreshEntity(baby);
-
             level.broadcastEntityEvent(parent1, (byte) 18);
             level.broadcastEntityEvent(parent2, (byte) 18);
             level.playSound(null, x, y, z,
@@ -778,6 +784,20 @@ public class ModEvents {
 
     private boolean isCompatible(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
+
+        // Never stack: horses, donkeys, mules, llamas, bees
+        if (a instanceof Horse || a instanceof Donkey || a instanceof Mule
+                || a instanceof Llama || a instanceof Bee) {
+            return false;
+        }
+
+        // Tamed wolves never auto-stack; prevent any merge involving a tamed wolf
+        if (a instanceof Wolf wolfA && b instanceof Wolf wolfB) {
+            if (wolfA.isTame() || wolfB.isTame()) {
+                return false;
+            }
+        }
+
         if (hasPlayerCustomName(a) || hasPlayerCustomName(b)) return false;
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
             if (sheepA.getColor() != sheepB.getColor()) return false;
@@ -790,6 +810,20 @@ public class ModEvents {
 
     private boolean isCompatibleIgnoringName(LivingEntity a, LivingEntity b) {
         if (a.getType() != b.getType()) return false;
+
+        // Never stack even with honey: horses, donkeys, mules, llamas, bees
+        if (a instanceof Horse || a instanceof Donkey || a instanceof Mule
+                || a instanceof Llama || a instanceof Bee) {
+            return false;
+        }
+
+        // For wolves: must match tamed status
+        if (a instanceof Wolf wolfA && b instanceof Wolf wolfB) {
+            if (wolfA.isTame() != wolfB.isTame()) {
+                return false;
+            }
+        }
+
         if (a instanceof Sheep sheepA && b instanceof Sheep sheepB) {
             if (sheepA.getColor() != sheepB.getColor()) return false;
         }
